@@ -2,7 +2,7 @@ import { useMemo, useState, type FormEvent } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { remove, save, useAll, type CalEvent, type Subject } from '../lib/store';
 import { addDays, longDate, parse, shortDate, today, weekdayIndex, ymd } from '../lib/dates';
-import { byDate, countdown, daysUntil, subjectByName, TYPES, type EventType } from '../lib/calendar';
+import { byDate, countdown, daysUntil, practiceEvents, subjectByName, TYPES, type EventType } from '../lib/calendar';
 
 const WEEK = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
 
@@ -14,13 +14,14 @@ const shiftMonth = (ym: string, n: number) => {
 
 export default function Calendario() {
   const events = useAll('event');
+  const practices = useAll('practice');
   const subjects = useAll('subject');
   const [selected, setSelected] = useState(today);
   const [month, setMonth] = useState(() => today().slice(0, 7));
   const [editing, setEditing] = useState<string | null>(null); // id del evento, o 'new'
 
   const now = today();
-  const sorted = useMemo(() => [...events].sort(byDate), [events]);
+  const sorted = useMemo(() => [...events, ...practiceEvents(practices)].sort(byDate), [events, practices]);
   const byDay = useMemo(() => {
     const map = new Map<string, CalEvent[]>();
     for (const e of sorted) map.set(e.date, [...(map.get(e.date) ?? []), e]);
@@ -43,6 +44,11 @@ export default function Calendario() {
     );
   }
 
+  // Las entregas de prácticas se gestionan en su asignatura, no aquí.
+  const open = (e: CalEvent) => {
+    if (e.practiceId) location.hash = `#/estudio/${e.subjectId}`;
+    else setEditing(e.id);
+  };
   const pick = (day: string) => { setSelected(day); setMonth(day.slice(0, 7)); };
   const first = `${month}-01`;
   const [y, m] = month.split('-').map(Number);
@@ -103,7 +109,7 @@ export default function Calendario() {
         </div>
         {dayEvents.length ? (
           <ul className="space-y-2">
-            {dayEvents.map(e => <EventRow key={e.id} event={e} subject={subjectOf(e)} onClick={() => setEditing(e.id)} />)}
+            {dayEvents.map(e => <EventRow key={e.id} event={e} subject={subjectOf(e)} onClick={() => open(e)} />)}
           </ul>
         ) : (
           <button className="card flex w-full cursor-pointer items-center gap-2 p-3 text-sm text-indigo-600 dark:text-indigo-400" onClick={() => setEditing('new')}>
@@ -116,7 +122,7 @@ export default function Calendario() {
         <h2 className="mb-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">Próximos</h2>
         {upcoming.length ? (
           <ul className="space-y-2">
-            {upcoming.map(e => <EventRow key={e.id} event={e} subject={subjectOf(e)} showDate onClick={() => setEditing(e.id)} />)}
+            {upcoming.map(e => <EventRow key={e.id} event={e} subject={subjectOf(e)} showDate onClick={() => open(e)} />)}
           </ul>
         ) : (
           <p className="card p-6 text-center text-sm text-zinc-500">No tienes nada por delante. Añade tus exámenes y entregas.</p>
@@ -136,7 +142,7 @@ export function EventRow({ event: e, subject, showDate = false, onClick }: {
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{e.title}</span>
         <span className="block truncate text-xs text-zinc-500 dark:text-zinc-400">
-          {TYPES[e.type].label}
+          {e.practiceId ? 'Práctica' : TYPES[e.type].label}
           {subject && <> · <span style={{ color: subject.color }}>●</span> {subject.name}</>}
           {showDate && ` · ${shortDate(e.date)}`}
           {e.time && ` · ${e.time}`}
@@ -152,7 +158,7 @@ export function EventRow({ event: e, subject, showDate = false, onClick }: {
     <li>
       {onClick
         ? <button className={`${cls} cursor-pointer`} onClick={onClick}>{body}</button>
-        : <a href="#/calendario" className={cls}>{body}</a>}
+        : <a href={e.practiceId ? `#/estudio/${e.subjectId}` : '#/calendario'} className={cls}>{body}</a>}
     </li>
   );
 }

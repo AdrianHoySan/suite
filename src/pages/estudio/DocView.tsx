@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronLeft, Download, ExternalLink, FileText, Trash2 } from 'lucide-react';
 import { save, useAll, type Doc, type Topic } from '../../lib/store';
 import { getFile } from '../../lib/files';
-import { deleteDoc, fileSize } from '../../lib/study';
+import { byDue, deleteDoc, fileSize } from '../../lib/study';
 
 export default function DocView({ docId }: { docId: string }) {
   const docs = useAll('doc');
@@ -20,6 +20,7 @@ export default function DocView({ docId }: { docId: string }) {
 
 function DocHeader({ doc, topics, children }: { doc: Doc; topics: Topic[]; children?: ReactNode }) {
   const ts = topics.filter(t => t.subjectId === doc.subjectId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const ps = useAll('practice').filter(p => p.subjectId === doc.subjectId).sort(byDue);
   return (
     <header className="mb-4">
       <div className="flex items-center gap-2">
@@ -45,9 +46,18 @@ function DocHeader({ doc, topics, children }: { doc: Doc; topics: Topic[]; child
         </button>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <select className="input w-auto py-1.5 text-sm" aria-label="Tema" value={doc.topicId ?? ''} onChange={e => save('doc', { id: doc.id, topicId: e.target.value || null })}>
+        <select
+          className="input w-auto max-w-full py-1.5 text-sm"
+          aria-label="Tema o práctica"
+          value={doc.practiceId && ps.some(p => p.id === doc.practiceId) ? `p:${doc.practiceId}` : doc.topicId ? `t:${doc.topicId}` : ''}
+          onChange={e => {
+            const [kind, id] = [e.target.value.slice(0, 2), e.target.value.slice(2)];
+            save('doc', { id: doc.id, topicId: kind === 't:' ? id : null, practiceId: kind === 'p:' ? id : null });
+          }}
+        >
           <option value="">General</option>
-          {ts.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          {ts.length > 0 && <optgroup label="Temas">{ts.map(t => <option key={t.id} value={`t:${t.id}`}>{t.name}</option>)}</optgroup>}
+          {ps.length > 0 && <optgroup label="Prácticas">{ps.map(p => <option key={p.id} value={`p:${p.id}`}>{p.name}</option>)}</optgroup>}
         </select>
         {children}
       </div>

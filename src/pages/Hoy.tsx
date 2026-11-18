@@ -3,7 +3,7 @@ import { Check, ChevronLeft, ChevronRight, Dumbbell, Flame, Pencil, Plus, Trash2
 import { remove, save, useAll, type Habit } from '../lib/store';
 import { addDays, longDate, today, weekdayIndex, weekdayLetter } from '../lib/dates';
 import { eaten, goalOf, mealsOf } from '../lib/diet';
-import { byDate } from '../lib/calendar';
+import { byDate, practiceEvents } from '../lib/calendar';
 import { EventRow } from './Calendario';
 
 export default function Hoy() {
@@ -121,6 +121,7 @@ function Resumen() {
   const plans = useAll('dietPlan');
   const goals = useAll('dietGoal');
   const events = useAll('event');
+  const practices = useAll('practice');
   const subjects = useAll('subject');
 
   const now = today();
@@ -130,7 +131,7 @@ function Resumen() {
   const gym = active ? `${active.name} en curso` : trained ? `${trained.name} hecho` : todays ? `Toca ${todays.name}` : 'Descanso';
   const kcal = Math.round(eaten(mealsOf(now, days, plans)).calories);
   const limit = addDays(now, 14);
-  const upcoming = [...events].filter(e => e.date >= now && e.date <= limit).sort(byDate).slice(0, 5);
+  const upcoming = [...events, ...practiceEvents(practices)].filter(e => e.date >= now && e.date <= limit).sort(byDate).slice(0, 5);
 
   return (
     <>

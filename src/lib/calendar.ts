@@ -1,4 +1,4 @@
-import { save, type CalEvent, type Subject } from './store';
+import { save, type CalEvent, type Practice, type Subject } from './store';
 import { parse, today } from './dates';
 
 export const TYPES = {
@@ -28,3 +28,10 @@ export function countdown(date: string) {
 
 /** Por fecha y, dentro del día, los de todo el día primero y luego por hora. */
 export const byDate = (a: CalEvent, b: CalEvent) => a.date.localeCompare(b.date) || (a.time ?? '').localeCompare(b.time ?? '');
+
+/** Las prácticas pendientes con fecha se ven en el calendario como entregas (no se guardan como evento). */
+export const practiceEvents = (practices: Practice[]): CalEvent[] =>
+  practices.filter(p => !p.done && p.dueDate).map(p => ({
+    id: `practica:${p.id}`, practiceId: p.id, title: p.name, type: 'entrega', date: p.dueDate!,
+    subjectId: p.subjectId, createdAt: p.createdAt, updatedAt: p.updatedAt,
+  }));

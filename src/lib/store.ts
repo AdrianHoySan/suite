@@ -46,17 +46,22 @@ export interface CalEvent extends Rec {
   title: string; type: 'examen' | 'entrega' | 'evento'; date: string;
   /** 'HH:MM'; sin hora = todo el día. */
   time?: string; subjectId?: string | null; notes?: string;
+  /** Solo en las entregas que se generan a partir de una práctica (no se guardan como evento). */
+  practiceId?: string;
 }
 
 // ---------- estudio ----------
 export type TopicStatus = 'pendiente' | 'leido' | 'resumido' | 'repasado';
 export interface Topic extends Rec { subjectId: string; name: string; status: TopicStatus }
+/** Práctica de una asignatura: su material son los Doc con su practiceId. doneAt = día en que se finalizó. */
+export interface Practice extends Rec { subjectId: string; name: string; dueDate?: string | null; done: boolean; doneAt?: string | null }
 /**
  * Archivo subido (kind 'file': el contenido va aparte, en files.ts) o resumen escrito en la app
- * (kind 'note': el texto va en el propio registro). topicId null = sin tema ("General").
+ * (kind 'note': el texto va en el propio registro). Pertenece a un tema, a una práctica o, sin
+ * ninguno de los dos, a "General".
  */
 export interface Doc extends Rec {
-  subjectId: string; topicId: string | null; name: string; kind: 'file' | 'note';
+  subjectId: string; topicId: string | null; practiceId?: string | null; name: string; kind: 'file' | 'note';
   fileId?: string; fileName?: string; size?: number; mime?: string; text?: string;
 }
 
@@ -65,7 +70,7 @@ interface Kinds {
   routine: Routine; workout: Workout;
   dietGoal: DietGoal; dietPlan: DietPlan; dietDay: DietDay;
   subject: Subject; event: CalEvent;
-  topic: Topic; doc: Doc;
+  topic: Topic; doc: Doc; practice: Practice;
 }
 export type Kind = keyof Kinds;
 type Fields<K extends Kind> = Omit<Kinds[K], keyof Rec>;

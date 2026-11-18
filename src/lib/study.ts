@@ -1,4 +1,4 @@
-import { remove, save, type Doc, type Topic, type TopicStatus } from './store';
+import { remove, save, type Doc, type Practice, type Topic, type TopicStatus } from './store';
 import { deleteFile, putFile } from './files';
 
 export const STATUS: Record<TopicStatus, { label: string; color: string }> = {
@@ -18,11 +18,14 @@ export const fileSize = (n: number) =>
 /** Para buscar sin que importen mayúsculas ni tildes. */
 export const norm = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
-export async function addFiles(files: File[], subjectId: string, topicId: string | null) {
+/** Dónde va un documento: un tema, una práctica o ninguno de los dos ("General"). */
+export interface DocTarget { topicId: string | null; practiceId: string | null }
+
+export async function addFiles(files: File[], subjectId: string, target: DocTarget) {
   for (const f of files) {
     const fileId = await putFile(f);
     save('doc', {
-      subjectId, topicId, kind: 'file', fileId, fileName: f.name,
+      subjectId, ...target, kind: 'file', fileId, fileName: f.name,
       name: f.name.replace(/\.[^.]+$/, ''), size: f.size, mime: f.type || 'application/octet-stream',
     });
   }
@@ -39,9 +42,22 @@ export function deleteTopic(topic: Topic, docs: Doc[]) {
   remove('topic', topic.id);
 }
 
-/** Borra la asignatura con sus temas y documentos. Los eventos del calendario se quedan, sin asignatura. */
-export function deleteSubject(id: string, topics: Topic[], docs: Doc[]) {
+/** Borra la práctica; su material pasa a "General" en vez de perderse. */
+export function deletePractice(practice: Practice, docs: Doc[]) {
+  for (const d of docs) if (d.practiceId === practice.id) save('doc', { id: d.id, practiceId: null });
+  remove('practice', practice.id);
+}
+
+/** Pendientes primero, por fecha de entrega (las que no tienen, al final); luego las finalizadas. */
+export const byDue = (a: Practice, b: Practice) =>
+  Number(a.done) - Number(b.done)
+  || (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999')
+  || a.createdAt.localeCompare(b.createdAt);
+
+/** Borra la asignatura con sus temas, prácticas y documentos. Los eventos del calendario se quedan, sin asignatura. */
+export function deleteSubject(id: string, topics: Topic[], practices: Practice[], docs: Doc[]) {
   docs.filter(d => d.subjectId === id).forEach(deleteDoc);
   remove('topic', ...topics.filter(t => t.subjectId === id).map(t => t.id));
+  remove('practice', ...practices.filter(p => p.subjectId === id).map(p => p.id));
   remove('subject', id);
 }

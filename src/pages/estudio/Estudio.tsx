@@ -1,9 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { FileText, PenLine, Plus, Search } from 'lucide-react';
-import { useAll, type Doc, type Subject, type Topic } from '../../lib/store';
+import { useAll, type Doc, type Practice, type Subject, type Topic } from '../../lib/store';
 import { useSyncStatus } from '../../lib/sync';
 import { cleanupFiles, usePendingUploads } from '../../lib/files';
-import { byDate, countdown, daysUntil, subjectByName, TYPES } from '../../lib/calendar';
+import { byDate, countdown, daysUntil, practiceEvents, subjectByName, TYPES } from '../../lib/calendar';
 import { norm, STATUS, STATUS_ORDER } from '../../lib/study';
 import { today } from '../../lib/dates';
 import SubjectView from './SubjectView';
@@ -21,6 +21,7 @@ function Home() {
   const subjects = useAll('subject');
   const topics = useAll('topic');
   const docs = useAll('doc');
+  const practices = useAll('practice');
   const events = useAll('event');
   const sync = useSyncStatus();
   const uploading = Object.values(usePendingUploads()).filter(op => op === 'up').length;
@@ -53,14 +54,16 @@ function Home() {
         <input className="input pl-9" type="search" aria-label="Buscar" placeholder="Buscar en temas, archivos y resúmenes…" value={q} onChange={e => setQ(e.target.value)} />
       </label>
 
-      {q.trim() ? <Results q={q} subjects={subjects} topics={topics} docs={docs} /> : (
+      {q.trim() ? <Results q={q} subjects={subjects} topics={topics} practices={practices} docs={docs} /> : (
         <>
           <ul className="grid gap-2 sm:grid-cols-2">
             {sorted.map(s => {
               const ts = topics.filter(t => t.subjectId === s.id);
               const count = (st: string) => ts.filter(t => t.status === st).length;
               const files = docs.filter(d => d.subjectId === s.id).length;
-              const exam = events.filter(e => e.subjectId === s.id && e.date >= now && e.type !== 'evento').sort(byDate)[0];
+              const pendingPractices = practices.filter(p => p.subjectId === s.id && !p.done).length;
+              const exam = [...events, ...practiceEvents(practices)]
+                .filter(e => e.subjectId === s.id && e.date >= now && e.type !== 'evento').sort(byDate)[0];
               return (
                 <li key={s.id}>
                   <a href={`#/estudio/${s.id}`} className="card block p-4 transition-colors hover:border-zinc-300 dark:hover:border-zinc-700">
@@ -69,7 +72,7 @@ function Home() {
                       <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
                       {exam && (
                         <span className={`shrink-0 text-xs font-semibold ${daysUntil(exam.date) <= 7 ? 'text-red-500' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                          {TYPES[exam.type].label} {countdown(exam.date).toLowerCase()}
+                          {exam.practiceId ? 'Práctica' : TYPES[exam.type].label} {countdown(exam.date).toLowerCase()}
                         </span>
                       )}
                     </div>
@@ -80,6 +83,7 @@ function Home() {
                     </div>
                     <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                       {ts.length} {ts.length === 1 ? 'tema' : 'temas'} · {count('repasado')} repasados · {files} {files === 1 ? 'documento' : 'documentos'}
+                      {pendingPractices > 0 && ` · ${pendingPractices} ${pendingPractices === 1 ? 'práctica pendiente' : 'prácticas pendientes'}`}
                     </p>
                   </a>
                 </li>
@@ -103,13 +107,14 @@ function Home() {
   );
 }
 
-function Results({ q, subjects, topics, docs }: { q: string; subjects: Subject[]; topics: Topic[]; docs: Doc[] }) {
+function Results({ q, subjects, topics, practices, docs }: { q: string; subjects: Subject[]; topics: Topic[]; practices: Practice[]; docs: Doc[] }) {
   const n = norm(q.trim());
   const subjectName = (id: string) => subjects.find(s => s.id === id)?.name ?? '';
   const hits: { key: string; href: string; title: string; sub: string; snippet?: string; note?: boolean }[] = [];
 
   for (const s of subjects) if (norm(s.name).includes(n)) hits.push({ key: s.id, href: `#/estudio/${s.id}`, title: s.name, sub: 'Asignatura' });
   for (const t of topics) if (norm(t.name).includes(n)) hits.push({ key: t.id, href: `#/estudio/${t.subjectId}`, title: t.name, sub: `Tema · ${subjectName(t.subjectId)}` });
+  for (const p of practices) if (norm(p.name).includes(n)) hits.push({ key: p.id, href: `#/estudio/${p.subjectId}`, title: p.name, sub: `Práctica${p.done ? ' finalizada' : ''} · ${subjectName(p.subjectId)}` });
   for (const d of docs) {
     const inName = norm(d.name).includes(n);
     const at = d.text ? norm(d.text).indexOf(n) : -1;
