@@ -3,7 +3,7 @@
 Mi suite personal, en una sola app web instalable (PWA) para el PC y el móvil:
 
 - **Hoy**: hábitos diarios (creatina, leer…) con rachas, y resumen de lo que toca.
-- **Estudio**: asignaturas → temas → PDFs y resúmenes. Estado de cada tema y buscador.
+- **Estudio**: asignaturas → temas y prácticas → PDFs, resúmenes y notas. Estado de cada tema, prácticas con fecha de entrega y botón de finalizada, y buscador.
 - **Calendario**: exámenes, entregas y eventos ligados a una asignatura, con cuenta atrás.
 - **Gym**: rutinas, entrenamiento en curso (se puede cambiar de rutina a mitad), historial y progreso.
 - **Dieta**: plan semanal de comidas, lo comido cada día y objetivos de calorías y macros.
@@ -28,6 +28,39 @@ Para tenerlo igual en el PC y en el móvil, conecta en **Ajustes** la misma base
 
 **Ajustes → Exportar** descarga una copia de los datos (sin los archivos de Estudio).
 
+## Claude (MCP)
+
+`mcp/suite-mcp.mjs` es un servidor MCP (Node 18+, sin dependencias) que deja a Claude trabajar con la Suite escribiendo directamente en Turso. La app lo recibe en la siguiente sincronización.
+
+| Herramienta | Qué hace |
+|---|---|
+| `ver_estudio` | Asignaturas, temas con su estado, documentos y próximos exámenes |
+| `leer_resumen` | Texto de un resumen guardado |
+| `guardar_resumen` | Crea un resumen o nota en una asignatura y un tema o práctica, o cambia uno (reemplazar o añadir al final) |
+| `subir_archivo` | Sube un archivo de este ordenador (PDF, Word, imagen…; máx. 50 MB) a un tema o una práctica |
+| `crear_temas` | Crea varios temas de golpe (p. ej. el temario) |
+| `crear_practica` / `estado_practica` | Crea una práctica (con fecha de entrega) y la marca como finalizada |
+| `estado_tema` | Cambia el estado de un tema (pendiente, leído, resumido, repasado) |
+| `ver_calendario` / `crear_evento` | Consulta y añade exámenes, entregas y eventos |
+| `anadir_compra` | Añade productos a la lista de la compra |
+
+Si la asignatura o el tema que le pides no existen, los crea. No borra nada.
+
+Para usarlo en Claude Desktop, en **Ajustes → Desarrollador → Editar configuración**, añade a `claude_desktop_config.json` (dentro de `mcpServers`, junto a los que ya tengas):
+
+```json
+"suite": {
+  "command": "node",
+  "args": ["C:\\Users\\adria\\Documents\\GitHub\\suite\\mcp\\suite-mcp.mjs"],
+  "env": {
+    "SUITE_TURSO_URL": "libsql://<base>.turso.io",
+    "SUITE_TURSO_TOKEN": "<token>"
+  }
+}
+```
+
+Usa la misma URL y token que en **Ajustes** de la app. Reinicia Claude y pídele, por ejemplo: «resume este PDF y guárdalo en Historia, tema 2», «sube C:\…\trabajo.docx a Física» o «apúntame el examen de Química el 3 de diciembre a las 9».
+
 ## Estructura
 
 ```
@@ -40,5 +73,6 @@ src/
     gym.ts, diet.ts, calendar.ts, study.ts, dates.ts, router.ts
   pages/          Una carpeta o archivo por módulo
 public/           Manifest, iconos y service worker
+mcp/suite-mcp.mjs Servidor MCP para Claude
 scripts/icons.mjs Genera los iconos PNG
 ```
