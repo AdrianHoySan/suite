@@ -43,8 +43,15 @@ Para tenerlo igual en el PC y en el móvil, conecta en **Ajustes** la misma base
 | `estado_tema` | Cambia el estado de un tema (pendiente, leído, resumido, repasado) |
 | `ver_calendario` / `crear_evento` | Consulta y añade exámenes, entregas y eventos |
 | `anadir_compra` | Añade productos a la lista de la compra |
+| `ver_gym` | Rutinas, entrenamiento en curso y últimos entrenamientos |
+| `guardar_rutina` / `borrar_rutina` | Crea o cambia una rutina (ejercicios, series, día, nombre) o la borra |
+| `registrar_entrenamiento` / `borrar_entrenamiento` | Apunta un entrenamiento ya hecho en el historial o lo borra |
+| `ver_dieta` | Comidas de un día (o el plan semanal), lo comido y los objetivos |
+| `editar_dia_dieta` | Añade, quita o marca como comidos alimentos de un día, o lo devuelve al plan |
+| `editar_plan_dieta` | Añade o quita alimentos del plan de un día de la semana |
+| `objetivos_dieta` | Cambia los objetivos de calorías y macros |
 
-Si la asignatura o el tema que le pides no existen, los crea. No borra nada.
+Si la asignatura, el tema o la práctica que le pides no existen, los crea. En Estudio no borra nada; en gym y dieta puede borrar rutinas, entrenamientos y alimentos cuando se lo pides.
 
 Para usarlo en Claude Desktop, en **Ajustes → Desarrollador → Editar configuración**, añade a `claude_desktop_config.json` (dentro de `mcpServers`, junto a los que ya tengas):
 

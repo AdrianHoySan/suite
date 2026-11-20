@@ -104,6 +104,14 @@ function put(stmts, kind, { _new, ...rec }) {
 }
 const commit = stmts => (stmts.length ? pipeline(stmts) : Promise.resolve());
 
+// Un borrado se guarda como deleted = 1 para que llegue al resto de dispositivos (igual que en la app).
+const TOMBSTONE = `INSERT INTO suite (kind, id, data, updated_at, deleted, synced_at)
+  VALUES (?, ?, NULL, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  ON CONFLICT (kind, id) DO UPDATE SET data = NULL, updated_at = excluded.updated_at,
+    deleted = 1, synced_at = excluded.synced_at
+  WHERE excluded.updated_at > suite.updated_at`;
+const del = (stmts, kind, rec) => stmts.push([TOMBSTONE, [kind, rec.id, after(rec.updatedAt)]]);
+
 // ---------- búsquedas por nombre ----------
 function findSubject(subjects, ref, { create = false, stmts } = {}) {
   const n = norm(ref);
@@ -159,6 +167,160 @@ const practiceEvents = practices => practices.filter(p => !p.done && p.dueDate)
 
 const fileSize = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const byDate = (a, b) => a.date.localeCompare(b.date) || (a.time ?? '').localeCompare(b.time ?? '');
+
+// ---------- gym y dieta ----------
+const DAYS = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo'];
+const DAY_NAMES = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+const GROUPS = ['Pierna', 'Pecho', 'Espalda', 'Hombro', 'Bíceps', 'Tríceps', 'Abdomen', 'Final', 'Otro'];
+const MEALS = ['Desayuno', 'Comida', 'Merienda', 'Cena'];
+const DEFAULT_GOAL = { calories: 2300, protein: 160, carbs: 250, fats: 70 };
+
+/** 0 = lunes … 6 = domingo, como en la app. */
+const weekdayOf = date => { const [y, m, d] = date.split('-').map(Number); return (new Date(y, m - 1, d).getDay() + 6) % 7; };
+function dayIndex(v) {
+  if (Number.isInteger(v) && v >= 0 && v <= 6) return v;
+  const i = DAYS.indexOf(norm(v));
+  if (i < 0) throw new Error(`día no válido: «${v}» (lunes … domingo)`);
+  return i;
+}
+function number(v, what, { int = false, min = 0 } = {}) {
+  const n = typeof v === 'string' ? Number(v.replace(',', '.')) : Number(v);
+  if (!Number.isFinite(n) || n < min || (int && !Number.isInteger(n))) throw new Error(`${what} debe ser un número${int ? ' entero' : ''} ≥ ${min}`);
+  return int ? n : Math.round(n * 100) / 100;
+}
+
+/** Todos los ejercicios conocidos (de rutinas y entrenamientos), para reutilizar su id y no partir su historial. */
+function catalog(routines, workouts) {
+  const map = new Map();
+  for (const src of [...routines, ...workouts]) for (const e of src.exercises ?? []) if (!map.has(norm(e.name))) map.set(norm(e.name), e);
+  return map;
+}
+
+/** Convierte ejercicios de la herramienta al formato de la app. done = series ya hechas (entrenamiento registrado). */
+function toExercises(list, known, done = false) {
+  if (!Array.isArray(list)) throw new Error('los ejercicios deben ir en una lista');
+  return list.map(e => {
+    const name = String(e?.nombre ?? '').trim();
+    if (!name) throw new Error('hay un ejercicio sin nombre');
+    const k = known.get(norm(name));
+    let sets;
+    if (Array.isArray(e.series)) {
+      sets = e.series.map((x, i) => ({ weight: number(x?.peso ?? 0, `peso de la serie ${i + 1} de ${name}`), reps: number(x?.reps, `reps de la serie ${i + 1} de ${name}`, { int: true, min: 1 }) }));
+    } else {
+      const n = number(e.num_series ?? 3, `num_series de ${name}`, { int: true, min: 1 });
+      const set = { weight: number(e.peso ?? 0, `peso de ${name}`), reps: number(e.reps ?? 10, `reps de ${name}`, { int: true, min: 1 }) };
+      sets = Array.from({ length: n }, () => ({ ...set }));
+    }
+    if (!sets.length) throw new Error(`${name} no tiene series`);
+    const unit = e.unidad ?? k?.unit;
+    return {
+      exId: k?.exId ?? randomUUID(), name: k?.name ?? name,
+      group: e.grupo ? (GROUPS.find(g => norm(g) === norm(e.grupo)) ?? 'Otro') : (k?.group ?? 'Otro'),
+      ...(unit ? { unit } : {}), ...(e.opcional ? { optional: true } : {}),
+      sets: done ? sets.map(x => ({ ...x, done: true })) : sets,
+    };
+  });
+}
+
+const fmtSets = sets => sets.map(x => `${x.weight}×${x.reps}`).join(' ');
+const findByName = (list, ref, what) => {
+  const found = list.find(x => x.id === ref) ?? list.find(x => norm(x.name) === norm(ref));
+  if (!found) throw new Error(`no existe ${what} «${ref}». Hay: ${list.map(x => x.name).join(', ') || 'ninguna'}`);
+  return found;
+};
+
+// Dieta: un alimento de la herramienta → formato de la app.
+function toFood(f) {
+  const name = String(f?.nombre ?? '').trim();
+  if (!name) throw new Error('hay un alimento sin nombre');
+  return {
+    name, calories: number(f.kcal ?? 0, `kcal de ${name}`), protein: number(f.proteina ?? 0, `proteina de ${name}`),
+    carbs: number(f.hidratos ?? 0, `hidratos de ${name}`), fats: number(f.grasas ?? 0, `grasas de ${name}`),
+  };
+}
+/** Clave de la comida tal y como existe (o una de las cuatro estándar); si no, una nueva con mayúscula. */
+function mealKey(meals, comida) {
+  const n = norm(comida);
+  if (!n) throw new Error('falta la comida (Desayuno, Comida, Merienda, Cena…)');
+  const k = Object.keys(meals).find(m => norm(m) === n) ?? MEALS.find(m => norm(m) === n);
+  if (k) return k;
+  const s = String(comida).trim();
+  return s[0].toUpperCase() + s.slice(1);
+}
+/** [comida, índice] de un alimento por nombre (exacto o, si no, que lo contenga). Error si no está o es ambiguo. */
+function findFood(meals, comida, alimento) {
+  const n = norm(alimento);
+  const keys = comida ? [mealKey(meals, comida)] : Object.keys(meals);
+  const search = test => keys.flatMap(k => (meals[k] ?? []).flatMap((f, i) => (test(norm(f.name)) ? [[k, i]] : [])));
+  let hits = search(x => x === n);
+  if (!hits.length) hits = search(x => x.includes(n));
+  if (!hits.length) throw new Error(`no hay «${alimento}»${comida ? ` en ${keys[0]}` : ''}`);
+  if (hits.length > 1) throw new Error(`«${alimento}» es ambiguo: ${hits.map(([k, i]) => `${meals[k][i].name} (${k})`).join(', ')}. Indica la comida o el nombre exacto`);
+  return hits[0];
+}
+const macros = foods => foods.reduce((t, f) => ({
+  kcal: t.kcal + (f.calories || 0), proteina: t.proteina + (f.protein || 0), hidratos: t.hidratos + (f.carbs || 0), grasas: t.grasas + (f.fats || 0),
+}), { kcal: 0, proteina: 0, hidratos: 0, grasas: 0 });
+const round = t => Object.fromEntries(Object.entries(t).map(([k, v]) => [k, Math.round(v)]));
+const showMeals = (meals, withDone) => Object.fromEntries(Object.entries(meals).map(([m, foods]) => [m, foods.map(f => ({
+  nombre: f.name, kcal: f.calories, proteina: f.protein, hidratos: f.carbs, grasas: f.fats, ...(withDone ? { comido: !!f.done } : {}),
+}))]));
+
+/**
+ * Aplica añadir / quitar / marcar a unas comidas (copia). Devuelve [comidas, informe].
+ * En el plan semanal no hay "comido": allowDone = false.
+ */
+function applyFoodOps(meals, { añadir = [], quitar = [], marcar = [] }, allowDone) {
+  const out = structuredClone(meals);
+  const informe = [];
+  for (const q of quitar) {
+    const [k, i] = findFood(out, q?.comida, q?.alimento);
+    informe.push(`quitado ${out[k][i].name} de ${k}`);
+    out[k] = out[k].filter((_, j) => j !== i);
+  }
+  for (const a of añadir) {
+    const k = mealKey(out, a?.comida);
+    const food = toFood(a);
+    if (allowDone) food.done = a.comido ?? true;
+    out[k] = [...(out[k] ?? []), food];
+    informe.push(`añadido ${food.name} a ${k}`);
+  }
+  if (marcar.length && !allowDone) throw new Error('en el plan no se marca lo comido; hazlo en un día concreto');
+  for (const m of marcar) {
+    const [k, i] = findFood(out, m?.comida, m?.alimento);
+    const done = m.comido ?? true;
+    out[k] = out[k].with(i, { ...out[k][i], done });
+    informe.push(`${out[k][i].name} (${k}) ${done ? 'comido' : 'sin comer'}`);
+  }
+  return [out, informe];
+}
+
+const ejercicioSchema = {
+  type: 'object',
+  properties: {
+    nombre: { type: 'string', description: 'Usa el nombre exacto si ya existe (ver_gym) para no partir su historial.' },
+    grupo: { type: 'string', enum: GROUPS },
+    series: { type: 'array', items: { type: 'object', properties: { peso: { type: 'number', description: 'kg (0 si es sin peso)' }, reps: { type: 'integer' } }, required: ['reps'] }, description: 'Serie a serie. Alternativa: num_series + peso + reps.' },
+    num_series: { type: 'integer' }, peso: { type: 'number' }, reps: { type: 'integer' },
+    unidad: { type: 'string', description: 'Solo si reps no son repeticiones, p. ej. "seg" en una plancha.' },
+    opcional: { type: 'boolean' },
+  },
+  required: ['nombre'],
+};
+const alimentoSchema = {
+  type: 'object',
+  properties: {
+    comida: { type: 'string', description: 'Desayuno, Comida, Merienda, Cena u otra' },
+    nombre: { type: 'string', description: 'Con la cantidad, p. ej. «Arroz (2 vasitos)»' },
+    kcal: { type: 'number' }, proteina: { type: 'number' }, hidratos: { type: 'number' }, grasas: { type: 'number' },
+  },
+  required: ['comida', 'nombre'],
+};
+const quitarSchema = {
+  type: 'array',
+  items: { type: 'object', properties: { comida: { type: 'string', description: 'Opcional si el nombre no se repite' }, alimento: { type: 'string' } }, required: ['alimento'] },
+};
+const diaProp = { type: 'string', description: 'Día de la semana: lunes … domingo' };
 
 // ---------- herramientas ----------
 const asignaturaProp = { type: 'string', description: 'Nombre (o id) de la asignatura. Da igual mayúsculas y tildes.' };
@@ -474,6 +636,250 @@ const TOOLS = [
       return { añadidos, reactivados, ya_estaban };
     },
   },
+  // ======================= GYM =======================
+  {
+    name: 'ver_gym',
+    description: 'Rutinas (con día de la semana, ejercicios y series), el entrenamiento en curso si lo hay y los últimos entrenamientos terminados.',
+    inputSchema: { type: 'object', properties: { entrenamientos: { type: 'integer', default: 5, description: 'Cuántos entrenamientos recientes mostrar' } } },
+    async run({ entrenamientos = 5 }) {
+      const { routine, workout } = await load('routine', 'workout');
+      const exs = list => list.map(e => ({ nombre: e.name, grupo: e.group, series: fmtSets(e.sets), ...(e.unit ? { unidad: e.unit } : {}), ...(e.optional ? { opcional: true } : {}) }));
+      const active = workout.filter(w => !w.finishedAt).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+      return {
+        rutinas: [...routine].sort((a, b) => (a.weekday ?? 7) - (b.weekday ?? 7) || a.name.localeCompare(b.name)).map(r => ({
+          id: r.id, nombre: r.name, dia: r.weekday == null ? null : DAY_NAMES[r.weekday], ejercicios: exs(r.exercises),
+        })),
+        en_curso: active ? { nombre: active.name, empezado: active.startedAt, series_hechas: active.exercises.flatMap(e => e.sets).filter(x => x.done).length } : null,
+        ultimos: workout.filter(w => w.finishedAt).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, Math.max(0, entrenamientos)).map(w => ({
+          id: w.id, fecha: w.date, nombre: w.name, minutos: Math.round((Date.parse(w.finishedAt) - Date.parse(w.startedAt)) / 60000), ejercicios: exs(w.exercises),
+        })),
+      };
+    },
+  },
+  {
+    name: 'guardar_rutina',
+    description: 'Crea una rutina o modifica una existente (por nombre o id). Con "ejercicios" se sustituye la lista entera; ' +
+      'con "añadir" se añaden ejercicios (o, si ya están en la rutina, se cambian sus series) y con "quitar" se quitan por nombre. ' +
+      'También cambia el nombre y el día de la semana. Mira antes ver_gym para usar los nombres exactos de los ejercicios.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rutina: { type: 'string', description: 'Nombre (o id) de la rutina; si no existe, se crea con ese nombre' },
+        nombre_nuevo: { type: 'string' },
+        dia: { type: 'string', description: 'lunes … domingo, o "ninguno" para quitarle el día' },
+        ejercicios: { type: 'array', items: ejercicioSchema, description: 'Lista completa (sustituye la actual)' },
+        añadir: { type: 'array', items: ejercicioSchema },
+        quitar: { type: 'array', items: { type: 'string' }, description: 'Nombres de ejercicios a quitar' },
+      },
+      required: ['rutina'],
+    },
+    async run({ rutina, nombre_nuevo, dia, ejercicios, añadir, quitar = [] }) {
+      const { routine, workout } = await load('routine', 'workout');
+      const known = catalog(routine, workout);
+      const found = routine.find(r => r.id === rutina) ?? routine.find(r => norm(r.name) === norm(rutina));
+      if (!found && !ejercicios && !añadir) throw new Error(`no existe la rutina «${rutina}»; para crearla da sus ejercicios`);
+      const r = found ?? { name: String(rutina).trim(), weekday: null, exercises: [] };
+      const informe = [];
+      let list = r.exercises;
+      if (ejercicios) { list = toExercises(ejercicios, known); informe.push(`ejercicios sustituidos (${list.length})`); }
+      for (const q of quitar) {
+        const i = list.findIndex(e => norm(e.name) === norm(q));
+        if (i < 0) throw new Error(`«${q}» no está en ${r.name}. Tiene: ${list.map(e => e.name).join(', ')}`);
+        informe.push(`quitado ${list[i].name}`);
+        list = list.filter((_, j) => j !== i);
+      }
+      for (const a of añadir ? toExercises(añadir, known) : []) {
+        const i = list.findIndex(e => e.exId === a.exId);
+        list = i >= 0 ? list.with(i, { ...list[i], ...a }) : [...list, a];
+        informe.push(`${i >= 0 ? 'cambiado' : 'añadido'} ${a.name}: ${fmtSets(a.sets)}`);
+      }
+      const weekday = dia === undefined ? r.weekday : (dia === null || dia === '' || norm(dia) === 'ninguno') ? null : dayIndex(dia);
+      if (weekday !== r.weekday) informe.push(`día: ${weekday == null ? 'sin día fijo' : DAY_NAMES[weekday]}`);
+      const name = String(nombre_nuevo ?? '').trim() || r.name;
+      if (name !== r.name) informe.push(`renombrada a ${name}`);
+      const stmts = [];
+      const rec = put(stmts, 'routine', { ...r, name, weekday, exercises: list });
+      await commit(stmts);
+      return { rutina: rec.name, id: rec.id, nueva: !found, cambios: informe, ejercicios: list.map(e => `${e.name}: ${fmtSets(e.sets)}`) };
+    },
+  },
+  {
+    name: 'borrar_rutina',
+    description: 'Borra una rutina. Los entrenamientos ya hechos con ella se conservan en el historial.',
+    inputSchema: { type: 'object', properties: { rutina: { type: 'string', description: 'Nombre o id' } }, required: ['rutina'] },
+    async run({ rutina }) {
+      const { routine } = await load('routine');
+      const r = findByName(routine, rutina, 'la rutina');
+      const stmts = [];
+      del(stmts, 'routine', r);
+      await commit(stmts);
+      return { borrada: r.name };
+    },
+  },
+  {
+    name: 'registrar_entrenamiento',
+    description: 'Apunta en el historial un entrenamiento ya hecho (p. ej. uno que el usuario te cuenta), con las series realizadas. Cuenta para el progreso de cada ejercicio.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fecha: { type: 'string', description: 'AAAA-MM-DD (por defecto, hoy)' },
+        rutina: { type: 'string', description: 'Opcional: rutina en la que se basó' },
+        nombre: { type: 'string', description: 'Opcional: nombre si no es una rutina (por defecto, el de la rutina)' },
+        duracion_min: { type: 'integer', default: 60 },
+        ejercicios: { type: 'array', items: ejercicioSchema },
+      },
+      required: ['ejercicios'],
+    },
+    async run({ fecha = today(), rutina, nombre, duracion_min = 60, ejercicios }) {
+      if (!isDate(fecha)) throw new Error('fecha debe ser AAAA-MM-DD');
+      if (fecha > today()) throw new Error('no se puede registrar un entrenamiento futuro');
+      const mins = number(duracion_min, 'duracion_min', { int: true, min: 1 });
+      const { routine, workout } = await load('routine', 'workout');
+      const r = rutina ? findByName(routine, rutina, 'la rutina') : null;
+      const exercises = toExercises(ejercicios, catalog(routine, workout), true);
+      if (!exercises.length) throw new Error('no hay ejercicios');
+      // Hoy: termina ahora. Otro día: a las 18:00 de ese día (hora local).
+      const [y, m, d] = fecha.split('-').map(Number);
+      const end = fecha === today() ? new Date() : new Date(y, m - 1, d, 18 + Math.ceil(mins / 60), 0);
+      const start = new Date(end.getTime() - mins * 60000);
+      const stmts = [];
+      const rec = put(stmts, 'workout', {
+        routineId: r?.id ?? null, name: String(nombre ?? '').trim() || r?.name || 'Entrenamiento', date: fecha,
+        startedAt: start.toISOString(), finishedAt: end.toISOString(), exercises,
+      });
+      await commit(stmts);
+      return { registrado: rec.id, nombre: rec.name, fecha, ejercicios: exercises.map(e => `${e.name}: ${fmtSets(e.sets)}`) };
+    },
+  },
+  {
+    name: 'borrar_entrenamiento',
+    description: 'Borra un entrenamiento terminado del historial (por su id, de ver_gym).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    async run({ id }) {
+      const { workout } = await load('workout');
+      const w = workout.find(x => x.id === id);
+      if (!w) throw new Error('no existe ese entrenamiento');
+      if (!w.finishedAt) throw new Error('ese entrenamiento está en curso; termínalo o descártalo desde la app');
+      const stmts = [];
+      del(stmts, 'workout', w);
+      await commit(stmts);
+      return { borrado: `${w.name} del ${w.date}` };
+    },
+  },
+
+  // ======================= DIETA =======================
+  {
+    name: 'ver_dieta',
+    description: 'Lo de un día: objetivos, comidas con sus macros, si están marcadas como comidas y el total comido. ' +
+      'Si ese día no se ha tocado en la app, muestra su plan. Con plan_semanal=true devuelve además el plan de los 7 días.',
+    inputSchema: {
+      type: 'object',
+      properties: { fecha: { type: 'string', description: 'AAAA-MM-DD (por defecto, hoy)' }, plan_semanal: { type: 'boolean', default: false } },
+    },
+    async run({ fecha = today(), plan_semanal = false }) {
+      if (!isDate(fecha)) throw new Error('fecha debe ser AAAA-MM-DD');
+      const { dietGoal, dietPlan, dietDay } = await load('dietGoal', 'dietPlan', 'dietDay');
+      const g = dietGoal.find(x => x.id === 'goals') ?? DEFAULT_GOAL;
+      const wd = weekdayOf(fecha);
+      const day = dietDay.find(x => x.id === fecha);
+      const plan = dietPlan.find(p => p.weekday === wd);
+      const meals = day?.meals ?? plan?.meals ?? {};
+      const all = Object.values(meals).flat();
+      return {
+        fecha, dia: DAY_NAMES[wd], registrado: !!day, ...(plan?.note && !day ? { nota_del_plan: plan.note } : {}),
+        objetivos: { kcal: g.calories, proteina: g.protein, hidratos: g.carbs, grasas: g.fats },
+        comido: round(macros(all.filter(f => f.done))), planificado: round(macros(all)),
+        comidas: showMeals(meals, true),
+        ...(plan_semanal ? {
+          plan_semanal: Object.fromEntries(DAY_NAMES.map((n, i) => {
+            const p = dietPlan.find(x => x.weekday === i);
+            return [n, p ? { ...(p.note ? { nota: p.note } : {}), comidas: showMeals(p.meals, false), total: round(macros(Object.values(p.meals).flat())) } : null];
+          })),
+        } : {}),
+      };
+    },
+  },
+  {
+    name: 'editar_dia_dieta',
+    description: 'Cambia lo comido un día concreto: añadir alimentos (por defecto como ya comidos), quitar alimentos y marcar o desmarcar como comido. ' +
+      'Si el día aún no se había tocado, parte de su plan. Con volver_al_plan=true descarta lo registrado ese día. Pon macros realistas si no te los dan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fecha: { type: 'string', description: 'AAAA-MM-DD (por defecto, hoy)' },
+        añadir: { type: 'array', items: { ...alimentoSchema, properties: { ...alimentoSchema.properties, comido: { type: 'boolean', default: true } } } },
+        quitar: quitarSchema,
+        marcar: { type: 'array', items: { type: 'object', properties: { comida: { type: 'string' }, alimento: { type: 'string' }, comido: { type: 'boolean', default: true } }, required: ['alimento'] } },
+        volver_al_plan: { type: 'boolean', default: false },
+      },
+    },
+    async run({ fecha = today(), añadir = [], quitar = [], marcar = [], volver_al_plan = false }) {
+      if (!isDate(fecha)) throw new Error('fecha debe ser AAAA-MM-DD');
+      const { dietPlan, dietDay } = await load('dietPlan', 'dietDay');
+      const day = dietDay.find(x => x.id === fecha);
+      const stmts = [];
+      if (volver_al_plan) {
+        if (añadir.length || quitar.length || marcar.length) throw new Error('volver_al_plan no se combina con otros cambios');
+        if (!day) return { fecha, nota: 'ese día ya estaba con su plan' };
+        del(stmts, 'dietDay', day);
+        await commit(stmts);
+        return { fecha, nota: 'descartado lo registrado; vuelve a verse el plan' };
+      }
+      if (!añadir.length && !quitar.length && !marcar.length) throw new Error('no hay nada que cambiar');
+      const base = day?.meals ?? dietPlan.find(p => p.weekday === weekdayOf(fecha))?.meals ?? {};
+      const [meals, cambios] = applyFoodOps(base, { añadir, quitar, marcar }, true);
+      put(stmts, 'dietDay', { ...(day ?? { id: fecha }), date: fecha, meals });
+      await commit(stmts);
+      return { fecha, cambios, comido: round(macros(Object.values(meals).flat().filter(f => f.done))) };
+    },
+  },
+  {
+    name: 'editar_plan_dieta',
+    description: 'Cambia el plan semanal de un día de la semana (lo que se propone cada lunes, martes…): añadir y quitar alimentos, y la nota del día. ' +
+      'No toca los días ya registrados. Pon macros realistas si no te los dan.',
+    inputSchema: {
+      type: 'object',
+      properties: { dia: diaProp, añadir: { type: 'array', items: alimentoSchema }, quitar: quitarSchema, nota: { type: 'string', description: 'Vacía para quitarla' } },
+      required: ['dia'],
+    },
+    async run({ dia, añadir = [], quitar = [], nota }) {
+      const wd = dayIndex(dia);
+      const { dietPlan } = await load('dietPlan');
+      const plan = dietPlan.find(p => p.weekday === wd);
+      const [meals, cambios] = applyFoodOps(plan?.meals ?? Object.fromEntries(MEALS.map(m => [m, []])), { añadir, quitar }, false);
+      const rec = { ...(plan ?? { id: `plan-${wd}` }), weekday: wd, meals };
+      if (nota !== undefined) {
+        if (String(nota).trim()) rec.note = String(nota).trim(); else delete rec.note;
+        cambios.push(String(nota).trim() ? 'nota cambiada' : 'nota quitada');
+      }
+      if (!cambios.length) throw new Error('no hay nada que cambiar');
+      const stmts = [];
+      put(stmts, 'dietPlan', rec);
+      await commit(stmts);
+      return { dia: DAY_NAMES[wd], cambios, total: round(macros(Object.values(meals).flat())) };
+    },
+  },
+  {
+    name: 'objetivos_dieta',
+    description: 'Cambia los objetivos diarios de calorías y macros (solo los que se indiquen).',
+    inputSchema: {
+      type: 'object',
+      properties: { kcal: { type: 'number' }, proteina: { type: 'number' }, hidratos: { type: 'number' }, grasas: { type: 'number' } },
+    },
+    async run({ kcal, proteina, hidratos, grasas }) {
+      const { dietGoal } = await load('dietGoal');
+      const g = dietGoal.find(x => x.id === 'goals') ?? { id: 'goals', ...DEFAULT_GOAL };
+      const next = { ...g };
+      if (kcal != null) next.calories = number(kcal, 'kcal', { int: true, min: 1 });
+      if (proteina != null) next.protein = number(proteina, 'proteina', { int: true });
+      if (hidratos != null) next.carbs = number(hidratos, 'hidratos', { int: true });
+      if (grasas != null) next.fats = number(grasas, 'grasas', { int: true });
+      const stmts = [];
+      put(stmts, 'dietGoal', next);
+      await commit(stmts);
+      return { kcal: next.calories, proteina: next.protein, hidratos: next.carbs, grasas: next.fats };
+    },
+  },
 ];
 
 // ---------- protocolo MCP por stdio ----------
@@ -489,11 +895,13 @@ async function handle(msg) {
       return reply(id, {
         protocolVersion: params?.protocolVersion || '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: 'suite', version: '1.0.0' },
+        serverInfo: { name: 'suite', version: '1.1.0' },
         instructions: 'La Suite es la app personal del usuario para estudiar (asignaturas → temas y prácticas → resúmenes, notas y archivos), ' +
           'con calendario de exámenes y lista de la compra. Puedes guardar resúmenes que escribas, subir trabajos o apuntes ' +
           'que estén en su ordenador, crear temas y prácticas (con su material y fecha de entrega), cambiar su estado y añadir exámenes o entregas. ' +
-          'Antes de guardar, mira con ver_estudio qué asignaturas y temas hay para usar sus nombres y no crear duplicados. ' +
+          'También gestiona el gimnasio (rutinas y entrenamientos: ver_gym, guardar_rutina, borrar_rutina, registrar_entrenamiento, borrar_entrenamiento) ' +
+          'y la dieta (ver_dieta, editar_dia_dieta, editar_plan_dieta, objetivos_dieta). ' +
+          'Antes de guardar, mira con ver_estudio, ver_gym o ver_dieta lo que hay para usar los nombres exactos y no crear duplicados. ' +
           'Lo que escribes llega a la app en su siguiente sincronización.',
       });
     case 'ping':
