@@ -270,7 +270,7 @@ const showMeals = (meals, withDone) => Object.fromEntries(Object.entries(meals).
  * Aplica añadir / quitar / marcar a unas comidas (copia). Devuelve [comidas, informe].
  * En el plan semanal no hay "comido": allowDone = false.
  */
-function applyFoodOps(meals, { añadir = [], quitar = [], marcar = [] }, allowDone) {
+function applyFoodOps(meals, { anadir = [], quitar = [], marcar = [] }, allowDone) {
   const out = structuredClone(meals);
   const informe = [];
   for (const q of quitar) {
@@ -278,7 +278,7 @@ function applyFoodOps(meals, { añadir = [], quitar = [], marcar = [] }, allowDo
     informe.push(`quitado ${out[k][i].name} de ${k}`);
     out[k] = out[k].filter((_, j) => j !== i);
   }
-  for (const a of añadir) {
+  for (const a of anadir) {
     const k = mealKey(out, a?.comida);
     const food = toFood(a);
     if (allowDone) food.done = a.comido ?? true;
@@ -659,7 +659,7 @@ const TOOLS = [
   {
     name: 'guardar_rutina',
     description: 'Crea una rutina o modifica una existente (por nombre o id). Con "ejercicios" se sustituye la lista entera; ' +
-      'con "añadir" se añaden ejercicios (o, si ya están en la rutina, se cambian sus series) y con "quitar" se quitan por nombre. ' +
+      'con "anadir" se añaden ejercicios (o, si ya están en la rutina, se cambian sus series) y con "quitar" se quitan por nombre. ' +
       'También cambia el nombre y el día de la semana. Mira antes ver_gym para usar los nombres exactos de los ejercicios.',
     inputSchema: {
       type: 'object',
@@ -668,16 +668,16 @@ const TOOLS = [
         nombre_nuevo: { type: 'string' },
         dia: { type: 'string', description: 'lunes … domingo, o "ninguno" para quitarle el día' },
         ejercicios: { type: 'array', items: ejercicioSchema, description: 'Lista completa (sustituye la actual)' },
-        añadir: { type: 'array', items: ejercicioSchema },
+        anadir: { type: 'array', items: ejercicioSchema },
         quitar: { type: 'array', items: { type: 'string' }, description: 'Nombres de ejercicios a quitar' },
       },
       required: ['rutina'],
     },
-    async run({ rutina, nombre_nuevo, dia, ejercicios, añadir, quitar = [] }) {
+    async run({ rutina, nombre_nuevo, dia, ejercicios, anadir, quitar = [] }) {
       const { routine, workout } = await load('routine', 'workout');
       const known = catalog(routine, workout);
       const found = routine.find(r => r.id === rutina) ?? routine.find(r => norm(r.name) === norm(rutina));
-      if (!found && !ejercicios && !añadir) throw new Error(`no existe la rutina «${rutina}»; para crearla da sus ejercicios`);
+      if (!found && !ejercicios && !anadir) throw new Error(`no existe la rutina «${rutina}»; para crearla da sus ejercicios`);
       const r = found ?? { name: String(rutina).trim(), weekday: null, exercises: [] };
       const informe = [];
       let list = r.exercises;
@@ -688,7 +688,7 @@ const TOOLS = [
         informe.push(`quitado ${list[i].name}`);
         list = list.filter((_, j) => j !== i);
       }
-      for (const a of añadir ? toExercises(añadir, known) : []) {
+      for (const a of anadir ? toExercises(anadir, known) : []) {
         const i = list.findIndex(e => e.exId === a.exId);
         list = i >= 0 ? list.with(i, { ...list[i], ...a }) : [...list, a];
         informe.push(`${i >= 0 ? 'cambiado' : 'añadido'} ${a.name}: ${fmtSets(a.sets)}`);
@@ -801,33 +801,33 @@ const TOOLS = [
   },
   {
     name: 'editar_dia_dieta',
-    description: 'Cambia lo comido un día concreto: añadir alimentos (por defecto como ya comidos), quitar alimentos y marcar o desmarcar como comido. ' +
+    description: 'Cambia lo comido un día concreto: anadir (alimentos, por defecto como ya comidos), quitar (alimentos) y marcar (comido o no). ' +
       'Si el día aún no se había tocado, parte de su plan. Con volver_al_plan=true descarta lo registrado ese día. Pon macros realistas si no te los dan.',
     inputSchema: {
       type: 'object',
       properties: {
         fecha: { type: 'string', description: 'AAAA-MM-DD (por defecto, hoy)' },
-        añadir: { type: 'array', items: { ...alimentoSchema, properties: { ...alimentoSchema.properties, comido: { type: 'boolean', default: true } } } },
+        anadir: { type: 'array', items: { ...alimentoSchema, properties: { ...alimentoSchema.properties, comido: { type: 'boolean', default: true } } } },
         quitar: quitarSchema,
         marcar: { type: 'array', items: { type: 'object', properties: { comida: { type: 'string' }, alimento: { type: 'string' }, comido: { type: 'boolean', default: true } }, required: ['alimento'] } },
         volver_al_plan: { type: 'boolean', default: false },
       },
     },
-    async run({ fecha = today(), añadir = [], quitar = [], marcar = [], volver_al_plan = false }) {
+    async run({ fecha = today(), anadir = [], quitar = [], marcar = [], volver_al_plan = false }) {
       if (!isDate(fecha)) throw new Error('fecha debe ser AAAA-MM-DD');
       const { dietPlan, dietDay } = await load('dietPlan', 'dietDay');
       const day = dietDay.find(x => x.id === fecha);
       const stmts = [];
       if (volver_al_plan) {
-        if (añadir.length || quitar.length || marcar.length) throw new Error('volver_al_plan no se combina con otros cambios');
+        if (anadir.length || quitar.length || marcar.length) throw new Error('volver_al_plan no se combina con otros cambios');
         if (!day) return { fecha, nota: 'ese día ya estaba con su plan' };
         del(stmts, 'dietDay', day);
         await commit(stmts);
         return { fecha, nota: 'descartado lo registrado; vuelve a verse el plan' };
       }
-      if (!añadir.length && !quitar.length && !marcar.length) throw new Error('no hay nada que cambiar');
+      if (!anadir.length && !quitar.length && !marcar.length) throw new Error('no hay nada que cambiar');
       const base = day?.meals ?? dietPlan.find(p => p.weekday === weekdayOf(fecha))?.meals ?? {};
-      const [meals, cambios] = applyFoodOps(base, { añadir, quitar, marcar }, true);
+      const [meals, cambios] = applyFoodOps(base, { anadir, quitar, marcar }, true);
       put(stmts, 'dietDay', { ...(day ?? { id: fecha }), date: fecha, meals });
       await commit(stmts);
       return { fecha, cambios, comido: round(macros(Object.values(meals).flat().filter(f => f.done))) };
@@ -835,18 +835,18 @@ const TOOLS = [
   },
   {
     name: 'editar_plan_dieta',
-    description: 'Cambia el plan semanal de un día de la semana (lo que se propone cada lunes, martes…): añadir y quitar alimentos, y la nota del día. ' +
+    description: 'Cambia el plan semanal de un día de la semana (lo que se propone cada lunes, martes…): anadir y quitar alimentos, y la nota del día. ' +
       'No toca los días ya registrados. Pon macros realistas si no te los dan.',
     inputSchema: {
       type: 'object',
-      properties: { dia: diaProp, añadir: { type: 'array', items: alimentoSchema }, quitar: quitarSchema, nota: { type: 'string', description: 'Vacía para quitarla' } },
+      properties: { dia: diaProp, anadir: { type: 'array', items: alimentoSchema }, quitar: quitarSchema, nota: { type: 'string', description: 'Vacía para quitarla' } },
       required: ['dia'],
     },
-    async run({ dia, añadir = [], quitar = [], nota }) {
+    async run({ dia, anadir = [], quitar = [], nota }) {
       const wd = dayIndex(dia);
       const { dietPlan } = await load('dietPlan');
       const plan = dietPlan.find(p => p.weekday === wd);
-      const [meals, cambios] = applyFoodOps(plan?.meals ?? Object.fromEntries(MEALS.map(m => [m, []])), { añadir, quitar }, false);
+      const [meals, cambios] = applyFoodOps(plan?.meals ?? Object.fromEntries(MEALS.map(m => [m, []])), { anadir, quitar }, false);
       const rec = { ...(plan ?? { id: `plan-${wd}` }), weekday: wd, meals };
       if (nota !== undefined) {
         if (String(nota).trim()) rec.note = String(nota).trim(); else delete rec.note;
